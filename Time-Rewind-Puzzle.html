@@ -1,0 +1,267 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Time-Rewind Puzzle — Single File</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;}
+  #wrap{display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px}
+  canvas{background:#0b1020;border-radius:8px; width: min(640px, 95vw); height: min(640px, 95vw); touch-action: none;}
+  .hud{color:#e6eef8}
+  button{padding:6px 10px;border-radius:6px;border:0;background:#2b6cff;color:#fff}
+  .small{font-size:13px;color:#bcd;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h3>Time-Rewind Puzzle</h3>
+  <canvas id="c" width="480" height="480"></canvas>
+  <div class="hud">
+    <span id="info">Use arrow keys to move. Collect all 3 gems. Press R to rewind (up to 4s).</span>
+    <div class="small" id="status"></div>
+  </div>
+  <div>
+    <button id="restart">Restart</button>
+  </div>
+</div>
+
+<script>
+/*
+Time-Rewind Puzzle
+- 8x8 grid
+- Player collects gems
+- Rewind (R): plays saved snapshots backwards up to 4s
+- Snapshots saved every 120ms
+*/
+
+// Config
+const GRID = 8;
+const TILE = 60; // base pixels; canvas resizes via CSS
+const SNAP_MS = 120;
+const MAX_REWIND_MS = 4000;
+const MAX_SNAPSHOTS = Math.ceil(MAX_REWIND_MS / SNAP_MS);
+
+// Canvas
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const restartBtn = document.getElementById('restart');
+
+// Game state (minimal)
+let state = {
+  player: {x:1,y:1},
+  gems: [], // array of {x,y,got}
+  walls: [], // simple walls boolean grid
+  rngSeed: Date.now()
+};
+
+let snapshotStack = []; // array of serialized states (for rewind)
+let lastSnapshotTime = 0;
+let isRewinding = false;
+let rewindIndex = 0;
+
+function seedRNG(seed){ let s = seed|0; return ()=>{ s = (s*1664525+1013904223)|0; return (s>>>0)/4294967295; }; }
+
+// initialize
+function initNewGame(){
+  const rand = seedRNG(state.rngSeed = Date.now());
+  state.player = {x: randInt(rand, 1, GRID-2), y: randInt(rand,1,GRID-2)};
+  // create some walls
+  state.walls = Array.from({length:GRID},()=>Array(GRID).fill(false));
+  for(let i=0;i<12;i++){ state.walls[randInt(rand,0,GRID-1)][randInt(rand,0,GRID-1)] = Math.random()<0.4 ? true : state.walls; }
+  // place 3 gems in empty cells
+  state.gems = [];
+  while(state.gems.length < 3){
+    let gx = randInt(rand,0,GRID-1), gy = randInt(rand,0,GRID-1);
+    if(!state.walls[gy][gx] && (gx!==state.player.x || gy!==state.player.y) && !state.gems.find(g=>g.x===gx&&g.y===gy)){
+      state.gems.push({x:gx,y:gy,got:false});
+    }
+  }
+  snapshotStack = [];
+  lastSnapshotTime = 0;
+  isRewinding = false;
+  rewindIndex = 0;
+  render();
+  updateStatus();
+}
+
+// helpers
+function randInt(rng,a,b){ return Math.floor(rng()*(b-a+1))+a; }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+
+// serialize minimal snapshot
+function snapshot(){
+  // store only primitives
+  const s = {
+    t: Date.now(),
+    playerX: state.player.x,
+    playerY: state.player.y,
+    gemsGot: state.gems.map(g=>g.got)
+  };
+  snapshotStack.push(s);
+  if(snapshotStack.length > MAX_SNAPSHOTS) snapshotStack.shift();
+}
+
+// apply snapshot by index (0 = oldest)
+function applySnapshotIndex(idx){
+  const s = snapshotStack[idx];
+  if(!s) return;
+  state.player.x = s.playerX;
+  state.player.y = s.playerY;
+  state.gems.forEach((g,i)=> g.got = s.gemsGot[i]);
+}
+
+function updateStatus(){
+  const collected = state.gems.filter(g=>g.got).length;
+  const total = state.gems.length;
+  statusEl.textContent = `Gems: ${collected}/${total}  |  Rewind: ${isRewinding ? 'ON' : 'OFF'}`;
+}
+
+function movePlayer(dx,dy){
+  if(isRewinding) return;
+  const nx = clamp(state.player.x + dx, 0, GRID-1);
+  const ny = clamp(state.player.y + dy, 0, GRID-1);
+  if(state.walls[ny] && state.walls[ny][nx]) return; // blocked
+  state.player.x = nx; state.player.y = ny;
+  // pick up gem?
+  state.gems.forEach(g=>{ if(!g.got && g.x===nx && g.y===ny) g.got = true; });
+  // after moving take snapshot (debounced)
+  const now = Date.now();
+  if(now - lastSnapshotTime >= SNAP_MS){ snapshot(); lastSnapshotTime = now; }
+  render();
+  updateStatus();
+  checkWin();
+}
+
+function checkWin(){
+  if(state.gems.every(g=>g.got)){
+    statusEl.textContent = 'You win! Press Restart to play again.';
+    // stop snapshotting
+    isRewinding = false;
+  }
+}
+
+// rewind logic: when user presses R -> toggle rewind playback
+function startRewind(){
+  if(snapshotStack.length < 2) return;
+  isRewinding = true;
+  rewindIndex = snapshotStack.length - 1; // start at latest
+  // play backwards via interval
+  const step = ()=>{
+    if(!isRewinding) return;
+    applySnapshotIndex(rewindIndex);
+    render();
+    updateStatus();
+    rewindIndex--;
+    if(rewindIndex < 0) { isRewinding = false; updateStatus(); }
+  };
+  // we want a faster visual: play snapshots every SNAP_MS/2
+  const interval = Math.max(30, SNAP_MS/2);
+  const id = setInterval(()=>{
+    if(!isRewinding){ clearInterval(id); return; }
+    step();
+  }, interval);
+}
+
+// stop rewind (freeze current)
+function stopRewind(){ isRewinding = false; updateStatus(); }
+
+// rendering
+function render(){
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.min(window.innerWidth*0.9, 640);
+  canvas.width = size * dpr;
+  canvas.height = size * dpr;
+  canvas.style.width = size + "px";
+  canvas.style.height = size + "px";
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  // compute tile size
+  const tileSize = canvas.width/dpr / GRID;
+  // background
+  ctx.fillStyle = '#081024'; ctx.fillRect(0,0,canvas.width/dpr,canvas.height/dpr);
+
+  // draw grid
+  for(let y=0;y<GRID;y++){
+    for(let x=0;x<GRID;x++){
+      const px = x*tileSize, py = y*tileSize;
+      // floor
+      ctx.fillStyle = '#0f1a2d';
+      ctx.fillRect(px+2,py+2,tileSize-4,tileSize-4);
+      // walls
+      if(state.walls[y] && state.walls[y][x]){
+        ctx.fillStyle = '#25323f';
+        ctx.fillRect(px+6,py+6,tileSize-12,tileSize-12);
+      }
+    }
+  }
+
+  // draw gems
+  state.gems.forEach(g=>{
+    const px = g.x*tileSize + tileSize/2, py = g.y*tileSize + tileSize/2;
+    if(!g.got){
+      ctx.beginPath();
+      ctx.fillStyle = '#ffd166';
+      ctx.arc(px,py, tileSize*0.18, 0, Math.PI*2);
+      ctx.fill();
+      ctx.closePath();
+    } else {
+      // faded gem
+      ctx.beginPath();
+      ctx.fillStyle = 'rgba(255,209,102,0.22)';
+      ctx.arc(px,py, tileSize*0.12, 0, Math.PI*2);
+      ctx.fill(); ctx.closePath();
+    }
+  });
+
+  // player
+  const px = state.player.x*tileSize + tileSize/2, py = state.player.y*tileSize + tileSize/2;
+  ctx.beginPath();
+  ctx.fillStyle = '#7bd389';
+  ctx.arc(px,py, tileSize*0.25, 0, Math.PI*2);
+  ctx.fill(); ctx.closePath();
+
+  // overlay grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  for(let i=0;i<=GRID;i++){
+    ctx.beginPath();
+    ctx.moveTo(i*tileSize,0); ctx.lineTo(i*tileSize, GRID*tileSize); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0,i*tileSize); ctx.lineTo(GRID*tileSize, i*tileSize); ctx.stroke();
+  }
+}
+
+// input
+window.addEventListener('keydown', e=>{
+  if(e.key === 'ArrowUp') { movePlayer(0,-1); e.preventDefault(); }
+  else if(e.key === 'ArrowDown'){ movePlayer(0,1); e.preventDefault(); }
+  else if(e.key === 'ArrowLeft'){ movePlayer(-1,0); e.preventDefault(); }
+  else if(e.key === 'ArrowRight'){ movePlayer(1,0); e.preventDefault(); }
+  else if(e.key.toLowerCase() === 'r'){ // toggle rewind
+    if(!isRewinding) startRewind(); else stopRewind();
+  }
+});
+
+// restart
+restartBtn.addEventListener('click', ()=>{ initNewGame(); });
+
+// initial snapshots + autosave every SNAP_MS
+function autosaveLoop(){
+  if(!isRewinding){
+    const now = Date.now();
+    if(now - lastSnapshotTime >= SNAP_MS){
+      snapshot(); lastSnapshotTime = now;
+    }
+  }
+  requestAnimationFrame(autosaveLoop);
+}
+
+// start
+initNewGame();
+autosaveLoop();
+render();
+
+</script>
+</body>
+</html>

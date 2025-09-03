@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Micro Roguelite — Single File</title>
+<style>
+  :root{--bg:#0b1220;--panel:#0f1b2b;--accent:#7bd389;--muted:#9fb0c8}
+  html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,Arial;color:#e6f0fb;background:var(--bg)}
+  .wrap{display:flex;gap:16px;flex-direction:column;align-items:center;padding:18px}
+  h1{margin:0;font-size:20px}
+  #ui{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  canvas{background:linear-gradient(180deg,#0f1726,#071022);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.6);touch-action:none}
+  .panel{background:var(--panel);padding:10px;border-radius:8px;color:#dfeffb;min-width:220px}
+  input[type="text"]{padding:6px;border-radius:6px;border:0;background:#071426;color:#dff;outline:2px solid rgba(255,255,255,0.02)}
+  button{padding:6px 10px;border-radius:6px;border:0;background:var(--accent);color:#042217;font-weight:600;cursor:pointer}
+  .small{font-size:12px;color:var(--muted);margin-top:6px}
+  .stat{display:flex;justify-content:space-between;margin:4px 0}
+  .footer{font-size:12px;color:var(--muted)}
+  .kbd{background:#0b2236;padding:3px 6px;border-radius:6px;color:#cde}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Micro Roguelite (single-file demo)</h1>
+  <div id="ui">
+    <div class="panel">
+      <div style="display:flex;gap:8px;align-items:center">
+        <label for="seed">Seed</label>
+        <input id="seed" type="text" placeholder="random or paste seed" />
+        <button id="gen">Generate</button>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button id="newRun">New Random Run</button>
+        <button id="restart">Restart</button>
+      </div>
+      <div class="small">Tip: paste a seed and press Generate to replay the same map.</div>
+      <div style="margin-top:10px">
+        <div class="stat"><span>HP</span><span id="hp">--</span></div>
+        <div class="stat"><span>Coins</span><span id="coins">--</span></div>
+        <div class="stat"><span>Turn</span><span id="turn">--</span></div>
+        <div class="stat"><span>Enemies</span><span id="enCount">--</span></div>
+      </div>
+    </div>
+
+    <canvas id="c" width="500" height="500" style="width:420px;height:420px"></canvas>
+
+    <div class="panel" style="min-width:200px;">
+      <div><strong>Controls</strong></div>
+      <div class="small" style="margin-top:6px">
+        Move: <span class="kbd">Arrow Keys</span> or <span class="kbd">WASD</span><br/>
+        Attack (melee): move into enemy or press <span class="kbd">Space</span> to attack adjacent enemy.<br/>
+        <span style="color:#ffd166">Hearts</span> heal, <span style="color:#ffd166">Coins</span> score.<br/>
+        Objective: survive & collect loot. Permadeath — restart to play again.
+      </div>
+      <div class="small" style="margin-top:8px">
+        Enemy types:
+        <ul style="margin:6px 0 0 18px;padding:0">
+          <li><strong>Goblin</strong> — chases the player (1 dmg).</li>
+          <li><strong>Slime</strong> — wanders randomly (0-1 dmg on contact).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer panel">
+    <strong>README</strong>
+    <div class="small" style="margin-top:6px">
+      This tiny roguelite demonstrates seedable procedural generation, simple turn-based combat, and two enemy behaviors. The RNG is seeded with a string, so the same seed recreates the same dungeon layout, loot, and enemy placements. No external libs — single HTML file.
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+Micro Roguelite — Single-file game
+- 10x10 grid canvas
+- Seedable RNG (string seed -> deterministic map)
+- Player, 2 enemy types, loot (heart, coin)
+- Turn-based: Player moves/attacks then enemies act
+- No external assets. Uses emoji & shapes.
+- Controls: Arrow keys / WASD, Space to attack adjacent enemy
+- Author: ChatGPT (example / educational)
+*/
+
+// ----------------- Utilities & RNG -----------------
+function hashStringToSeed(str) {
+  // FNV-1a-like small hash -> integer seed
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+// Mulberry32 RNG
+function createRNG(seed) {
+  let t = seed >>> 0;
+  return function() {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), t | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function randInt(rng, a, b) { return Math.floor(rng() * (b - a + 1)) + a; }
+
+// ----------------- Game Config -----------------
+const SIZE = 10;
+const TILE = 42; // drawn tile size
+const CANVAS_PIX = TILE * SIZE;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = CANVAS_PIX;
+canvas.height = CANVAS_PIX;
+
+const seedInput = document.getElementById('seed');
+const genBtn = document.getElementById('gen');
+const newRunBtn = document.getElementById('newRun');
+const restartBtn = document.getElementById('restart');
+
+const hpEl = document.getElementById('hp');
+const coinsEl = document.getElementById('coins');
+const turnEl = document.getElementById('turn');
+const enCountEl = document.getElementById('enCount');
+
+// ----------------- Game State -----------------
+let state = {
+  seedStr: '',
+  rng: createRNG(hashStringToSeed('default')),
+  map: [], // 2D array 'wall' or 'floor'
+  player: { x: 1, y: 1, hp: 10, maxHp: 10, coins: 0 },
+  enemies: [], // {id,type,x,y,hp}
+  loot: [], // {x,y,type} type: 'heart' or 'coin'
+  turn: 0,
+  alive: true
+};
+
+// ----------------- Map Generation -----------------
+function generateMapFromSeed(seedStr) {
+  state.seedStr = seedStr || String(Date.now());
+  const seed = hashStringToSeed(state.seedStr);
+  state.rng = createRNG(seed);
+
+  // Initialize all walls, then carve floors with drunkard walk
+  const map = Array.from({ length: SIZE }, () => Array.from({ length: SIZE }, () => 'wall'));
+  // Start in roughly center
+  let px = Math.floor(SIZE / 2), py = Math.floor(SIZE / 2);
+  map[py][px] = 'floor';
+
+  const targetFloors = Math.floor(SIZE * SIZE * 0.45); // roughly 45% floor
+  let carved = 1;
+  while (carved < targetFloors) {
+    // random step
+    const dir = randInt(state.rng, 0, 3);
+    if (dir === 0 && px > 1) px--;
+    if (dir === 1 && px < SIZE - 2) px++;
+    if (dir === 2 && py > 1) py--;
+    if (dir === 3 && py < SIZE - 2) py++;
+    if (map[py][px] === 'wall') {
+      map[py][px] = 'floor';
+      carved++;
+    }
+    // occasionally carve a small room
+    if (state.rng() < 0.02) {
+      for (let rx = -1; rx <= 1; rx++) for (let ry = -1; ry <= 1; ry++) {
+        const nx = clamp(px + rx, 1, SIZE - 2), ny = clamp(py + ry, 1, SIZE - 2);
+        if (map[ny][nx] === 'wall') { map[ny][nx] = 'floor'; carved++; }
+      }
+    }
+  }
+
+  // Ensure border walls
+  for (let i = 0; i < SIZE; i++) {
+    map[0][i] = 'wall'; map[SIZE - 1][i] = 'wall';
+    map[i][0] = 'wall'; map[i][SIZE - 1] = 'wall';
+  }
+
+  state.map = map;
+
+  // Place player at a random floor tile near center
+  let ppos = findRandomFloor();
+  state.player.x = ppos.x; state.player.y = ppos.y;
+  state.player.hp = state.player.maxHp = 10; state.player.coins = 0;
+
+  // Place enemies and loot
+  state.enemies = [];
+  state.loot = [];
+  // place 3-5 enemies
+  const numEnemies = randInt(state.rng, 3, 5);
+  for (let i = 0; i < numEnemies; i++) {
+    placeEnemy();
+  }
+  // place 6-10 loot items (hearts rarer)
+  const numLoot = randInt(state.rng, 6, 10);
+  for (let i = 0; i < numLoot; i++) placeLoot();
+
+  state.turn = 1;
+  state.alive = true;
+  updateUI();
+  render();
+  // helpers
+  function findRandomFloor() {
+    for (let tries = 0; tries < 500; tries++) {
+      const x = randInt(state.rng, 1, SIZE - 2);
+      const y = randInt(state.rng, 1, SIZE - 2);
+      if (state.map[y][x] === 'floor') return { x, y };
+    }
+    return { x: 1, y: 1 };
+  }
+  function placeEnemy() {
+    const spot = findRandomFloor();
+    // don't place on player or existing enemy
+    if (spot.x === state.player.x && spot.y === state.player.y) return placeEnemy();
+    if (state.enemies.some(e => e.x === spot.x && e.y === spot.y)) return placeEnemy();
+    // 60% goblin (chaser), 40% slime (wanderer)
+    const typ = state.rng() < 0.6 ? 'goblin' : 'slime';
+    state.enemies.push({ id: Date.now() + Math.random(), type: typ, x: spot.x, y: spot.y, hp: typ === 'goblin' ? 3 : 2 });
+  }
+  function placeLoot() {
+    const spot = findRandomFloor();
+    if ((spot.x === state.player.x && spot.y === state.player.y) ||
+        state.enemies.some(e => e.x === spot.x && e.y === spot.y) ||
+        state.loot.some(l => l.x === spot.x && l.y === spot.y)) {
+      return placeLoot();
+    }
+    const typ = state.rng() < 0.18 ? 'heart' : 'coin';
+    state.loot.push({ x: spot.x, y: spot.y, type: typ });
+  }
+}
+
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+// ----------------- Rendering -----------------
+function render() {
+  // clear
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // tiles
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const t = state.map[y][x];
+      if (t === 'wall') {
+        ctx.fillStyle = '#0c1a22';
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        // add rock texture
+        ctx.fillStyle = '#0f2b3a';
+        ctx.fillRect(x * TILE + 4, y * TILE + 4, TILE - 8, TILE - 8);
+      } else {
+        // floor
+        ctx.fillStyle = '#07202a';
+        ctx.fillRect(x * TILE, y * TILE, TILE, TILE);
+        ctx.fillStyle = '#08303e';
+        ctx.fillRect(x * TILE + 2, y * TILE + 2, TILE - 4, TILE - 4);
+      }
+    }
+  }
+  // draw loot
+  state.loot.forEach(l => {
+    const cx = l.x * TILE + TILE / 2, cy = l.y * TILE + TILE / 2;
+    ctx.font = (TILE * 0.8) + 'px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (l.type === 'coin') {
+      ctx.fillText('🪙', cx, cy);
+    } else {
+      ctx.fillText('❤️', cx, cy);
+    }
+  });
+
+  // draw enemies (above loot)
+  state.enemies.forEach(e => {
+    const cx = e.x * TILE + TILE / 2, cy = e.y * TILE + TILE / 2;
+    ctx.font = (TILE * 0.8) + 'px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (e.type === 'goblin') ctx.fillText('👺', cx, cy);
+    else ctx.fillText('🟢', cx, cy); // slime
+    // hp bar
+    ctx.fillStyle = '#0008'; ctx.fillRect(e.x * TILE + 6, e.y * TILE + TILE - 12, TILE - 12, 6);
+    ctx.fillStyle = '#ff6b6b'; ctx.fillRect(e.x * TILE + 6, e.y * TILE + TILE - 12, (TILE - 12) * (e.hp / (e.type === 'goblin' ? 3 : 2)), 6);
+  });
+
+  // draw player on top
+  const px = state.player.x * TILE + TILE / 2, py = state.player.y * TILE + TILE / 2;
+  ctx.font = (TILE * 0.9) + 'px serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🙋‍♂️', px, py);
+
+  // HUD overlay: a small tint for current selected tile (optional)
+  // grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  for (let i = 0; i <= SIZE; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * TILE, 0); ctx.lineTo(i * TILE, SIZE * TILE); ctx.stroke();
+    ctx.moveTo(0, i * TILE); ctx.lineTo(SIZE * TILE, i * TILE); ctx.stroke();
+  }
+}
+
+// ----------------- Game Logic -----------------
+function isWalkable(x, y) {
+  if (x < 0 || y < 0 || x >= SIZE || y >= SIZE) return false;
+  return state.map[y][x] === 'floor' && !state.enemies.some(e => e.x === x && e.y === y);
+}
+function enemyAt(x, y) {
+  return state.enemies.find(e => e.x === x && e.y === y);
+}
+function lootAt(x, y) {
+  return state.loot.find(l => l.x === x && l.y === y);
+}
+
+function playerMove(dx, dy) {
+  if (!state.alive) return;
+  const nx = state.player.x + dx, ny = state.player.y + dy;
+  // bounds & wall
+  if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) return;
+  if (state.map[ny][nx] === 'wall') return;
+  // if enemy -> attack
+  const en = enemyAt(nx, ny);
+  if (en) {
+    attackEnemy(en);
+  } else {
+    // move
+    state.player.x = nx; state.player.y = ny;
+    // pick up loot
+    const l = lootAt(nx, ny);
+    if (l) {
+      if (l.type === 'coin') { state.player.coins += 1; }
+      else { state.player.hp = Math.min(state.player.maxHp, state.player.hp + 4); }
+      // remove loot
+      state.loot = state.loot.filter(x => !(x.x === l.x && x.y === l.y));
+    }
+    // pass turn to enemies
+    state.turn++;
+    enemiesAct();
+  }
+  updateUI(); render(); checkDeath();
+}
+
+function attackEnemy(enemy) {
+  // player attack deals 2 dmg
+  enemy.hp -= 2;
+  // if enemy dies, remove & maybe drop a coin
+  if (enemy.hp <= 0) {
+    // remove enemy
+    state.enemies = state.enemies.filter(e => e.id !== enemy.id);
+    // reward coin sometimes
+    if (state.rng() < 0.7) state.loot.push({ x: enemy.x, y: enemy.y, type: 'coin' });
+  } else {
+    // enemy may retaliate immediately (simple)
+    // small chance of counter damage
+    if (state.rng() < 0.4) {
+      state.player.hp -= 1;
+    }
+  }
+  state.turn++;
+  enemiesAct();
+}
+
+function enemiesAct() {
+  // Each enemy moves or attacks
+  for (let e of state.enemies.slice()) {
+    if (!state.alive) break;
+    if (e.type === 'goblin') { goblinAct(e); }
+    else { slimeAct(e); }
+  }
+  state.turn++;
+  updateUI(); render(); checkDeath();
+}
+
+function goblinAct(e) {
+  // greedy move towards player (simple pathfinding)
+  const dx = state.player.x - e.x, dy = state.player.y - e.y;
+  let moved = false;
+  const cand = [];
+  if (Math.abs(dx) > Math.abs(dy)) {
+    cand.push({ x: e.x + Math.sign(dx), y: e.y });
+    cand.push({ x: e.x, y: e.y + Math.sign(dy) });
+  } else {
+    cand.push({ x: e.x, y: e.y + Math.sign(dy) });
+    cand.push({ x: e.x + Math.sign(dx), y: e.y });
+  }
+  // fallback neighbors
+  cand.push({ x: e.x + 1, y: e.y }, { x: e.x - 1, y: e.y }, { x: e.x, y: e.y + 1 }, { x: e.x, y: e.y - 1 });
+
+  for (let c of cand) {
+    if (c.x === state.player.x && c.y === state.player.y) {
+      // attack player
+      state.player.hp -= 1;
+      moved = true; break;
+    }
+    if (isWalkable(c.x, c.y)) {
+      e.x = c.x; e.y = c.y; moved = true; break;
+    }
+  }
+  // small idle chance
+  if (!moved && state.rng() < 0.15) {
+    // random adjacent move
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    const d = dirs[randInt(state.rng,0,3)];
+    if (isWalkable(e.x + d[0], e.y + d[1])) { e.x += d[0]; e.y += d[1]; }
+  }
+}
+
+function slimeAct(e) {
+  // random wander; if next to player, do 0-1 damage
+  const dist = Math.abs(e.x - state.player.x) + Math.abs(e.y - state.player.y);
+  if (dist === 1) {
+    // chance to damage
+    if (state.rng() < 0.5) state.player.hp -= 1;
+    return;
+  }
+  // random move chance
+  if (state.rng() < 0.7) {
+    const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+    const d = dirs[randInt(state.rng,0,3)];
+    if (isWalkable(e.x + d[0], e.y + d[1])) { e.x += d[0]; e.y += d[1]; }
+  }
+}
+
+function checkDeath() {
+  if (state.player.hp <= 0) {
+    state.alive = false;
+    state.player.hp = 0;
+    updateUI();
+    render();
+    setTimeout(() => {
+      alert('You died — restart to try again.');
+    }, 40);
+  }
+}
+
+function updateUI() {
+  hpEl.textContent = `${state.player.hp}/${state.player.maxHp}`;
+  coinsEl.textContent = state.player.coins;
+  turnEl.textContent = state.turn;
+  enCountEl.textContent = state.enemies.length;
+}
+
+// ----------------- Input Handling -----------------
+window.addEventListener('keydown', (e) => {
+  if (!state.alive) return;
+  const key = e.key;
+  if (key === 'ArrowUp' || key === 'w' || key === 'W') { playerMove(0, -1); e.preventDefault(); }
+  else if (key === 'ArrowDown' || key === 's' || key === 'S') { playerMove(0, 1); e.preventDefault(); }
+  else if (key === 'ArrowLeft' || key === 'a' || key === 'A') { playerMove(-1, 0); e.preventDefault(); }
+  else if (key === 'ArrowRight' || key === 'd' || key === 'D') { playerMove(1, 0); e.preventDefault(); }
+  else if (key === ' ' || key === 'Spacebar') {
+    // space: attempt attack on any adjacent enemy (prefer one)
+    const adj = state.enemies.find(e => Math.abs(e.x - state.player.x) + Math.abs(e.y - state.player.y) === 1);
+    if (adj) attackEnemy(adj);
+    else {
+      // small hint: no enemy
+      // do nothing, but consume turn
+      state.turn++; enemiesAct();
+    }
+    e.preventDefault();
+  }
+});
+
+// Button handlers
+genBtn.addEventListener('click', () => {
+  const txt = (seedInput.value || '').trim();
+  if (!txt) { alert('Paste or type a seed string.'); return; }
+  generateMapFromSeed(txt);
+});
+newRunBtn.addEventListener('click', () => {
+  const rnd = String(Date.now()) + Math.floor(Math.random() * 999999);
+  seedInput.value = rnd;
+  generateMapFromSeed(rnd);
+});
+restartBtn.addEventListener('click', () => {
+  // regenerate from the current seed
+  generateMapFromSeed(seedInput.value || String(Date.now()));
+});
+
+// Click on canvas to move (tap) — works for mobile
+canvas.addEventListener('click', (ev) => {
+  if (!state.alive) return;
+  const rect = canvas.getBoundingClientRect();
+  const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
+  const tx = Math.floor(cx / (rect.width / SIZE));
+  const ty = Math.floor(cy / (rect.height / SIZE));
+  // compute direction (one-step) towards clicked tile if adjacent or move only one step towards it
+  const dx = clamp(Math.sign(tx - state.player.x), -1, 1);
+  const dy = clamp(Math.sign(ty - state.player.y), -1, 1);
+  playerMove(dx, dy);
+});
+
+// initialize first run
+(function init() {
+  const defaultSeed = 'micro-roguelite-' + (new Date()).toISOString().slice(0,10);
+  seedInput.value = defaultSeed;
+  generateMapFromSeed(defaultSeed);
+})();
+
+</script>
+</body>
+</html>
