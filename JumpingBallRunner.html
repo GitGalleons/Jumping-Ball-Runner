@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+  <title>Jumping Ball Runner</title>
+  <style>
+    :root{
+      --ui: #222;
+      --accent: #ff3d7f;
+      --accent-2: #00d4ff;
+      --accent-3: #ffd166;
+      --bg: #87ceeb;
+      --shadow: rgba(0,0,0,.15);
+      --panel: rgba(255,255,255,.9);
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(#87ceeb,#bfeaff 60%, #e4f6ff);} 
+    *{box-sizing:border-box;font-family:system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"}
+    #wrap{position:relative;display:flex;align-items:center;justify-content:center;height:100%;}
+    canvas{display:block; width:100%; height:100%; max-height:100vh; touch-action:manipulation; background:transparent;}
+
+    /* UI overlay */
+    .hud{position:absolute; inset:0; pointer-events:none;}
+    .score{
+      position:absolute; left:16px; top:12px; background:var(--panel); color:var(--ui);
+      padding:8px 12px; border-radius:16px; box-shadow:0 8px 24px var(--shadow);
+      font-weight:700; letter-spacing:.3px; display:flex; gap:12px; align-items:center;
+    }
+    .score .chip{border-radius:999px; padding:4px 10px; background:#fff; box-shadow:inset 0 0 0 2px rgba(0,0,0,.05)}
+    .btnbar{position:absolute; right:16px; top:12px; display:flex; gap:8px;}
+    .btn{pointer-events:auto; border:0; background:var(--accent); color:white; font-weight:700; padding:10px 14px; border-radius:14px; box-shadow:0 8px 24px var(--shadow); cursor:pointer; transition:transform .06s ease;}
+    .btn.secondary{background:var(--accent-2);}
+    .btn:active{transform:translateY(1px) scale(.98)}
+
+    .center{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;}
+
+    .panel{pointer-events:auto; background:var(--panel); backdrop-filter:saturate(1.2) blur(6px);
+      border-radius:24px; padding:20px 22px; box-shadow:0 16px 40px var(--shadow); text-align:center; max-width:520px;}
+    h1{margin:0 0 6px; font-size:clamp(22px, 5vw, 36px); color:var(--ui)}
+    p{margin:0 0 10px; color:#333}
+    kbd{background:#111; color:#fff; padding:2px 6px; border-radius:6px; font-size:.9em}
+    .row{display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:10px}
+
+    .pill{display:inline-flex; align-items:center; gap:8px; background:#fff; border-radius:999px; padding:6px 10px; box-shadow:inset 0 0 0 2px rgba(0,0,0,.05)}
+
+    .footer{position:absolute; left:50%; transform:translateX(-50%); bottom:8px; font-size:12px; background:#fff9; padding:6px 10px; border-radius:999px; box-shadow:0 8px 24px var(--shadow)}
+
+    @media (max-width: 680px){ .score{left:8px; top:8px} .btnbar{right:8px; top:8px} }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <canvas id="game"></canvas>
+    <div class="hud">
+      <div class="score">
+        <div class="pill"><span>Score</span><span id="scoreVal" class="chip">0</span></div>
+        <div class="pill"><span>Best</span><span id="bestVal" class="chip">0</span></div>
+        <div class="pill"><span>Speed</span><span id="spdVal" class="chip">1.0x</span></div>
+      </div>
+      <div class="btnbar">
+        <button class="btn secondary" id="btnPause" title="Pause (P)">Pause</button>
+        <button class="btn" id="btnRetry" title="Retry (R)">Retry</button>
+      </div>
+
+      <div class="center" id="overlayStart">
+        <div class="panel">
+          <h1>🏃‍♂️🎈 Jumping Ball Runner</h1>
+          <p>Jump over obstacles and survive as long as you can. The world gets faster. Don’t panic — bounce with style.</p>
+          <div class="row"><span class="pill">Jump: <kbd>Space</kbd> / <kbd>↑</kbd> / Tap</span><span class="pill">Retry: <kbd>R</kbd></span><span class="pill">Pause: <kbd>P</kbd></span></div>
+          <div class="row"><button class="btn" id="btnStart">Start Game</button></div>
+        </div>
+      </div>
+
+      <div class="center" id="overlayGameOver" style="display:none">
+        <div class="panel">
+          <h1>💥 Oof! The Ball biffed it.</h1>
+          <p id="finalScore">You scored 0. Your best is 0.</p>
+          <div class="row">
+            <button class="btn" id="btnRetry2">Retry</button>
+            <button class="btn secondary" id="btnShare">Share Score</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">Colorful parallax • Cartoon vibes • Silly sounds • Built with &lt;canvas&gt;</div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+  const $ = sel => document.querySelector(sel);
+  const $score = $('#scoreVal');
+  const $best = $('#bestVal');
+  const $spd = $('#spdVal');
+  const overlayStart = $('#overlayStart');
+  const overlayGameOver = $('#overlayGameOver');
+  const finalScore = $('#finalScore');
+
+  let W = 0, H = 0, GROUND_Y = 0;
+  function resize(){
+    W = cvs.clientWidth; H = cvs.clientHeight; 
+    cvs.width = Math.floor(W * dpr); cvs.height = Math.floor(H * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    GROUND_Y = H * 0.8;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Simple PRNG for consistent fluff
+  let seed = Date.now() % 2147483647;
+  function rand(){ seed = seed * 48271 % 2147483647; return seed / 2147483647; }
+
+  // Audio (funny bleeps)
+  const Audio = (() => {
+    const ctxA = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctxA.createGain(); master.gain.value = 0.2; master.connect(ctxA.destination);
+
+    function beep(type='sine', f=440, t=0.08, slide=0){
+      const o = ctxA.createOscillator();
+      const g = ctxA.createGain();
+      o.type = type; o.frequency.value = f; o.connect(g); g.connect(master);
+      const now = ctxA.currentTime;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(1, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + t);
+      if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(80, f + slide), now + t);
+      o.start(now); o.stop(now + t + 0.02);
+    }
+
+    function noiseCrash(t=0.3){
+      const bufferSize = 1 * ctxA.sampleRate;
+      const buffer = ctxA.createBuffer(1, bufferSize, ctxA.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i=0;i<bufferSize;i++){ data[i] = (Math.random()*2-1) * (1 - i/bufferSize); }
+      const src = ctxA.createBufferSource(); src.buffer = buffer;
+      const g = ctxA.createGain(); g.gain.value = 0.6; src.connect(g); g.connect(master);
+      const now = ctxA.currentTime; src.start(now); src.stop(now+t);
+    }
+
+    return {
+      jump: () => beep('sine', 660, 0.12, 200),
+      land: () => beep('square', 240, 0.05, -120),
+      score: () => beep('triangle', 920, 0.06, -200),
+      bonk: () => { noiseCrash(0.25); beep('sawtooth', 140, 0.18, -80); },
+      resume: () => beep('triangle', 520, 0.06, 120),
+      pause: () => beep('triangle', 220, 0.06, -120),
+      ctx: ctxA,
+    };
+  })();
+
+  // Game state
+  const state = {
+    running: false,
+    paused: false,
+    time: 0,
+    speed: 6, // world units per frame baseline
+    speedMul: 1,
+    spawnTimer: 0,
+    score: 0,
+    best: Number(localStorage.getItem('jbr.best')||0),
+  };
+  $best.textContent = state.best;
+
+  // Player (cartoon ball)
+  const player = {
+    x: 120,
+    y: 0,
+    r: 26,
+    vy: 0,
+    onGround: true,
+    blink: 0,
+  };
+
+  function reset(){
+    state.time = 0; state.speed = 6; state.speedMul = 1; state.spawnTimer = 0; state.score = 0;
+    player.y = GROUND_Y - player.r; player.vy = 0; player.onGround = true; player.blink = 0;
+    obstacles.length = 0; clouds.length = 0; decorateClouds();
+  }
+
+  // Obstacles
+  const obstacles = [];
+  function spawnObstacle(){
+    const w = 30 + Math.floor(rand()*40);
+    const h = 30 + Math.floor(rand()*60);
+    const type = rand() < 0.3 ? 'spike' : 'box';
+    const face = rand() < 0.7;
+    obstacles.push({ x: W + 40, y: GROUND_Y - h, w, h, type, face, wink: 0 });
+  }
+
+  // Clouds (parallax far)
+  const clouds = [];
+  function decorateClouds(){
+    const n = 6;
+    for (let i=0;i<n;i++){
+      clouds.push({ x: rand()*W, y: 40 + rand()*H*0.4, s: 50 + rand()*120, spd: 0.3 + rand()*0.6 });
+    }
+  }
+  decorateClouds();
+
+  // Hills (parallax mid) — procedural
+  function drawHills(){
+    const base = GROUND_Y - 30;
+    const hillH = 50;
+    ctx.fillStyle = '#8AE68A';
+    const speed = state.speed * 0.25 * state.speedMul;
+    ctx.save();
+    ctx.translate((-state.time*speed)%W, 0);
+    for (let j=0;j<2;j++){
+      ctx.beginPath();
+      ctx.moveTo(-W, base);
+      for (let x=-W; x<W*2; x+=20){
+        const y = base - Math.sin((x+j*100)/180*Math.PI)*hillH;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(W*2, H); ctx.lineTo(-W, H); ctx.closePath();
+      ctx.fill();
+      ctx.translate(W,0);
+    }
+    ctx.restore();
+  }
+
+  // Ground stripes (near parallax)
+  function drawGround(){
+    ctx.fillStyle = '#7ED957';
+    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+    // stripes
+    const stripeH = 8;
+    ctx.fillStyle = 'rgba(0,0,0,0.05)';
+    const speed = state.speed * 1.2 * state.speedMul;
+    const offset = (state.time*speed)% (stripeH*12);
+    for (let y=GROUND_Y+4; y<H; y+=stripeH*2){
+      ctx.fillRect(-offset, y, W*2, stripeH);
+    }
+  }
+
+  function drawSky(){
+    // simple gradient sky already via body bg; draw clouds
+    ctx.save();
+    clouds.forEach(c => {
+      c.x -= c.spd * state.speedMul; if (c.x < -c.s*2) c.x = W + c.s*2;
+      ctx.beginPath();
+      const puffs = 4;
+      for (let i=0;i<puffs;i++){
+        const px = c.x + i * (c.s/2);
+        const py = c.y + Math.sin((state.time*0.01 + i)*1.5)*2;
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.arc(px, py, c.s/3 + (i%2?8:0), 0, Math.PI*2);
+        ctx.fill(); ctx.beginPath();
+      }
+    });
+    ctx.restore();
+  }
+
+  function drawPlayer(){
+    // shadow
+    const shadowScale = player.onGround ? 1 : 0.7;
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath(); ctx.ellipse(player.x, GROUND_Y + 6, player.r*shadowScale, player.r*0.35*shadowScale, 0, 0, Math.PI*2); ctx.fill();
+
+    // body
+    const bodyGrad = ctx.createRadialGradient(player.x - player.r*0.3, player.y - player.r*0.4, player.r*0.2, player.x, player.y, player.r);
+    bodyGrad.addColorStop(0, '#ff8bd1');
+    bodyGrad.addColorStop(1, '#ff3d7f');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+
+    // eyes (cartoon)
+    const blink = (Math.sin(state.time*0.15) > 0.95 || player.blink>0) ? 0.1 : 1;
+    const eyeY = player.y - player.r*0.2;
+    const eyeDX = 8;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.ellipse(player.x - eyeDX, eyeY, 7, 9*blink, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(player.x + eyeDX, eyeY, 7, 9*blink, 0, 0, Math.PI*2); ctx.fill();
+    // pupils
+    const look = Math.min(1, Math.max(-1, player.vy/12));
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(player.x - eyeDX + look, eyeY, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(player.x + eyeDX + look, eyeY, 3, 0, Math.PI*2); ctx.fill();
+    // mouth
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(player.x, player.y + 2, 8, 0, Math.PI); ctx.stroke();
+  }
+
+  function drawObstacle(o){
+    ctx.save();
+    ctx.translate(o.x, o.y);
+    if (o.type==='spike'){
+      const spikes = Math.max(2, Math.floor(o.w/14));
+      ctx.fillStyle = '#7f8c8d';
+      ctx.beginPath();
+      for (let i=0;i<spikes;i++){
+        const bx = (i/spikes)*o.w; 
+        ctx.moveTo(bx, o.h); ctx.lineTo(bx+o.w/spikes/2, 0); ctx.lineTo(bx+o.w/spikes, o.h);
+      }
+      ctx.closePath(); ctx.fill();
+    } else {
+      // box with face
+      const grad = ctx.createLinearGradient(0,0,0,o.h);
+      grad.addColorStop(0,'#ffd166'); grad.addColorStop(1,'#ffad33');
+      ctx.fillStyle = grad; ctx.fillRect(0,0,o.w,o.h);
+      ctx.strokeStyle = 'rgba(0,0,0,0.15)'; ctx.strokeRect(0,0,o.w,o.h);
+      if (o.face){
+        // goofy face
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(o.w*0.35, o.h*0.35, 5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(o.w*0.65, o.h*0.35, 5, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(o.w*0.35 + (o.w*0.02), o.h*0.35 + (o.w*0.02), 2.2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(o.w*0.65 + (o.w*0.02*Math.sin(state.time*0.2)), o.h*0.35, 2.2, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = '#222'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(o.w*0.5, o.h*0.6, 8, 0, Math.PI); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  function circleRectHit(cx, cy, r, rx, ry, rw, rh){
+    const closestX = Math.max(rx, Math.min(cx, rx+rw));
+    const closestY = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx - closestX, dy = cy - closestY;
+    return dx*dx + dy*dy < r*r * 0.85; // forgiving hitbox
+  }
+
+  // Controls
+  function jump(){
+    if (!state.running || state.paused) return;
+    if (player.onGround){ player.vy = -13; player.onGround = false; Audio.jump(); }
+  }
+  function retry(){ startGame(); }
+  function togglePause(){ if (!state.running) return; state.paused = !state.paused; (state.paused?Audio.pause:Audio.resume)(); }
+
+  window.addEventListener('keydown', e => {
+    if (e.code==='Space' || e.code==='ArrowUp' || e.code==='KeyW') { e.preventDefault(); jump(); }
+    if (e.code==='KeyR') { retry(); }
+    if (e.code==='KeyP') { togglePause(); }
+  });
+  cvs.addEventListener('pointerdown', jump);
+
+  // Buttons
+  document.getElementById('btnStart').onclick = () => { startGame(); };
+  document.getElementById('btnRetry').onclick = retry;
+  document.getElementById('btnRetry2').onclick = retry;
+  document.getElementById('btnPause').onclick = togglePause;
+  document.getElementById('btnShare').onclick = () => {
+    const text = `I scored ${state.score} in Jumping Ball Runner! Can you beat me?`;
+    if (navigator.share) navigator.share({ title: 'Jumping Ball Runner', text, url: location.href }).catch(()=>{});
+    else navigator.clipboard?.writeText(text);
+  };
+
+  // Game loop
+  let last = 0;
+  function tick(ts){
+    requestAnimationFrame(tick);
+    if (!state.running || state.paused) return;
+    if (!last) last = ts; const dt = Math.min(32, ts - last); last = ts; // clamp
+    state.time += dt * 0.06; // time scale
+
+    // Speed ramps over time
+    state.speedMul = 1 + Math.min(2.5, state.time * 0.02);
+
+    // Physics
+    player.vy += 0.6; // gravity
+    player.y += player.vy;
+    if (player.y >= GROUND_Y - player.r){ player.y = GROUND_Y - player.r; if (!player.onGround) Audio.land(); player.onGround = true; player.vy = 0; }
+
+    // Spawn obstacles
+    state.spawnTimer -= dt * (0.03 + state.speedMul*0.03);
+    if (state.spawnTimer <= 0){
+      spawnObstacle();
+      state.spawnTimer = 60 + rand()*80 / state.speedMul;
+    }
+
+    // Move & collide
+    const worldSpd = state.speed * state.speedMul;
+    for (let i=obstacles.length-1; i>=0; i--){
+      const o = obstacles[i];
+      o.x -= worldSpd;
+      if (o.x + o.w < -40){ obstacles.splice(i,1); continue; }
+      if (circleRectHit(player.x, player.y, player.r*0.9, o.x, o.y, o.w, o.h)){
+        gameOver(); return;
+      }
+      // Score when passing
+      if (!o.scored && o.x + o.w < player.x){ o.scored = true; state.score++; if (state.score % 5 === 0) Audio.score(); }
+    }
+
+    // Draw
+    ctx.clearRect(0,0,W,H);
+    drawSky();
+    drawHills();
+    drawGround();
+
+    obstacles.forEach(drawObstacle);
+    drawPlayer();
+
+    // UI updates
+    $score.textContent = state.score;
+    $best.textContent = state.best;
+    $spd.textContent = (state.speedMul).toFixed(1) + 'x';
+  }
+
+  function gameOver(){
+    Audio.bonk();
+    state.running = false; overlayGameOver.style.display = '';
+    if (state.score > state.best){ state.best = state.score; localStorage.setItem('jbr.best', String(state.best)); }
+    finalScore.textContent = `You scored ${state.score}. Your best is ${state.best}.`;
+  }
+
+  function startGame(){
+    overlayStart.style.display = 'none'; overlayGameOver.style.display = 'none';
+    state.running = true; state.paused = false; last = 0; reset();
+    // Resume audio context on user gesture (mobile)
+    if (Audio.ctx.state === 'suspended') Audio.ctx.resume();
+  }
+
+  // Auto start loop
+  requestAnimationFrame(tick);
+
+  // Pause when tab not visible to be nice on battery
+  document.addEventListener('visibilitychange', () => { if (document.hidden) state.paused = true; });
+
+})();
+</script>
+</body>
+</html>
